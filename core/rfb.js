@@ -157,6 +157,8 @@ export default class RFB extends EventTargetMixin {
 
         this._extendedPointerEventSupported = false;
 
+        this._ultraVncMonitorCount = 0;
+
         this._clipboardText = null;
         this._clipboardServerCapabilitiesActions = {};
         this._clipboardServerCapabilitiesFormats = {};
@@ -2263,13 +2265,18 @@ export default class RFB extends EventTargetMixin {
         encs.push(encodings.pseudoEncodingLastRect);
         encs.push(encodings.pseudoEncodingQEMUExtendedKeyEvent);
         encs.push(encodings.pseudoEncodingQEMULedEvent);
-        encs.push(encodings.pseudoEncodingExtendedDesktopSize);
+        // Note: ExtendedDesktopSize excluded - UltraVNC sends full combined desktop size
+        // via ExtendedDesktopSize which overrides per-monitor size from DesktopSize
+        // encs.push(encodings.pseudoEncodingExtendedDesktopSize);
         encs.push(encodings.pseudoEncodingXvp);
         encs.push(encodings.pseudoEncodingFence);
         encs.push(encodings.pseudoEncodingContinuousUpdates);
         encs.push(encodings.pseudoEncodingDesktopName);
         encs.push(encodings.pseudoEncodingExtendedClipboard);
         encs.push(encodings.pseudoEncodingExtendedMouseButtons);
+
+        // UltraVNC extension: request monitor info from server
+        encs.push(0xFFFF8005);
 
         if (this._fbDepth == 24) {
             encs.push(encodings.pseudoEncodingVMwareCursor);
@@ -2622,6 +2629,17 @@ export default class RFB extends EventTargetMixin {
             case 250:  // XVP
                 return this._handleXvpMsg();
 
+            case 13:   // UltraVNC KeepAlive (1 byte total, type already consumed)
+                return true;
+
+            case 252:  // UltraVNC rfbMonitorInfo
+                if (this._sock.rQwait("MonitorInfo", 3)) { return false; }
+                this._ultraVncMonitorCount = this._sock.rQshift8();
+                this._sock.rQskipBytes(2);
+                this.dispatchEvent(new CustomEvent("ultraVncMonitorInfo",
+                    { detail: { count: this._ultraVncMonitorCount } }));
+                return true;
+
             default:
                 this._fail("Unexpected server message (type " + msgType + ")");
                 Log.Debug("sock.rQpeekBytes(30): " + this._sock.rQpeekBytes(30));
@@ -2699,10 +2717,18 @@ export default class RFB extends EventTargetMixin {
 
             case encodings.pseudoEncodingDesktopSize:
                 this._resize(this._FBU.width, this._FBU.height);
+                this.dispatchEvent(new CustomEvent("ultraVncDesktopResized",
+                    { detail: { width: this._FBU.width, height: this._FBU.height } }));
                 return true;
 
-            case encodings.pseudoEncodingExtendedDesktopSize:
-                return this._handleExtendedDesktopSize();
+            case encodings.pseudoEncodingExtendedDesktopSize: {
+                const extDesktopSizeRet = this._handleExtendedDesktopSize();
+                if (extDesktopSizeRet) {
+                    this.dispatchEvent(new CustomEvent("ultraVncDesktopResized",
+                        { detail: {} }));
+                }
+                return extDesktopSizeRet;
+            }
 
             case encodings.pseudoEncodingExtendedMouseButtons:
                 this._extendedPointerEventSupported = true;
